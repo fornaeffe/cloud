@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Nuvole</title>
+    <style>
+      body {
+        margin: 0;
+		background: green;
+      }
+
+      button {
+        width: 100px;
+      }
+
+      input[type="range"] {
+      }
+
+      span {
+         position: relative;
+         bottom: 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas class="myCanvas">
+      <p>This browser doesn't support canvas.</p>
+    </canvas>
+	<div class="toolbar">
+		  Temperatura:
+		  <input type="range" min="0" max="40" value="30" class="slider" id="temp">
+		  Umidità:
+		  <input type="range" min="0" max="70" value="30" class="slider" id="humidity">
+		  <button id="detail">Dettagli</button>
+		</div>
+    <script>
+
+const canvas = document.querySelector('.myCanvas');
+const ctx = canvas.getContext('2d');
+
+const width = canvas.width = document.body.offsetWidth;
+const height = canvas.height = window.innerHeight * 0.9;
+
+const tempSlider = document.getElementById("temp");
+const humiditySlider = document.getElementById("humidity");
+const detailButton = document.getElementById("detail");
+
+const L = 0.00976; // Dry adiabatic lapse rate from https://en.wikipedia.org/wiki/Atmospheric_pressure
+const R = 8.314462618; // Universal gas constant
+const MM_water = 18.01528; // Water molar mass in g / mol
+
+// From https://en.wikipedia.org/wiki/Lapse_rate#Moist_adiabatic_lapse_rate :
+const g = 9.8076; // Earth's gravitational acceleration in m/(s^2)
+const Hv = 2501000; // Heat of vaporization of water in J / Kg
+const Rsd = 287; // Specific gas constant of dry air in J / ( kg * K )
+const epsilon = 0.622; // Ratio between specific gas constants of dry air and water vapour
+const cpd = 1003.5; // Specific heat of dry air at constant pressure in J / ( kg * K )
+
+const scale = 200; // Scale of air mass side
+const hscale_max = 11000 / ( height ); // Scale of height ( m per pixel )
+let hscale = hscale_max;
+
+// let moistflag = false;  // Debug
+
+function pressure(h) {
+	// Barometric formula from https://en.wikipedia.org/wiki/Atmospheric_pressure
+	return 101325 * Math.pow( 1 - L * h / 288.16, 9.80665 * 0.02896968 / ( R * L ) );
+}
+
+function vapour_pressure(T) {
+	// Tetens equation from https://en.wikipedia.org/wiki/Vapour_pressure_of_water
+	return 611.21 * Math.exp( 17.27 * ( T - 273.15 ) / ( T - 35.85 ) );
+}
+
+function Lm(T, p) {
+	// Moist adiabatic lapse rate
+	// from https://en.wikipedia.org/wiki/Lapse_rate#Moist_adiabatic_lapse_rate
+	const e = vapour_pressure(T);
+	const r = epsilon * e / ( p - e );
+	return g * T * ( Rsd * T + Hv * r ) / ( cpd * Rsd * T * T + Hv * Hv * r * epsilon );
+}
+
+// Integrate moist adiabatic lapse rate with 1 m step
+function moist_adiabatic(T0, h0, dh) {
+	let T = T0;
+	
+	if (dh > 0) {
+		for (let h = h0; h < h0 + dh; h++ ) {
+			T += - Lm(T, pressure(h + 0.5));
+		}
+	} else {
+		for (let h = h0; h > h0 + dh; h-- ) {
+			T += Lm(T, pressure(h - 0.5));
+		}
+	}
+	
+	
+	return T;
+}
+
+
+// Clouds
+// From https://github.com/melalj/canvas-clouds
+(function () {
+  'use strict';
+
+  var TWO_PI = Math.PI * 2;
+
+  var gray_range = function(gray, delta) {
+    if(gray - delta < 0){
+      return [0, gray];
+    }
+    else{
+      return [gray - delta, gray];
+    }
+  };
+
+  var gray_to_rgb = function(gray){
+    return gray + ', ' + gray + ', ' + gray;
+  };
+
+  var default_opts = {
+     // Cloud radius
+    radius: 60,
+
+    // Center of the cloud coordinates [x, y]. If null, it's to the top-left of the canvas
+    // Can also be an array of coordinates if the cloud have many positions [[x,y],..]
+    position: [60, 60],
+
+    // rgb(gray, gray, gray) - goes from 0 for black to 255 for white
+    gray: 128,
+
+    // How much we variate the gray
+    gray_delta: 50,
+
+    // How many circles we draw per cloud
+    circles_per_cloud: 30,
+
+    // Inner Cloud Circle radius (from 0 to 1), Can be either Float or Array of float [min, max]
+    circle_radius_ratio: [0.3, 0.6],
+	
+    // Ratio of circles positions on the x axis
+    ratio_circles_x: 1,
+
+    // Ratio of circles positions on the y axis
+    ratio_circles_y: 1
+  };
+
+  CanvasRenderingContext2D.prototype.appendCloud = function(custom_opts) {
+    var context = this;
+
+    var opts = {};
+
+    // Override default propterties
+    for (var key_default in default_opts) {
+      if (default_opts.hasOwnProperty(key_default)){
+        opts[key_default] = default_opts[key_default];
+      }
+    }
+
+    for (var key_custom in custom_opts) {
+      if (custom_opts.hasOwnProperty(key_custom)){
+        opts[key_custom] = custom_opts[key_custom];
+      }
+    }
+
+    // Position the cloud to topLeft=0,0
+    if(opts.position === null){
+      opts.position = [[opts.radius, opts.radius]];
+    }
+    else if(opts.position instanceof Array && opts.position.length > 0 && !(opts.position[0] instanceof Array)){
+      opts.position = [opts.position];
+    }
+
+    var max_x = Math.max.apply(null, opts.position.map(function(p){return p[0];}));
+    var max_y = Math.max.apply(null, opts.position.map(function(p){return p[1];}));
+    var min_x = Math.min.apply(null, opts.position.map(function(p){return p[0];}));
+    var min_y = Math.min.apply(null, opts.position.map(function(p){return p[1];}));
+
+    var centroid = [(max_x + min_x) / 2 , (max_y + min_y) / 2];
+
+
+    // Clouds.
+    // Create the circle's radial gradient.
+
+    var gray_extent = gray_range(opts.gray, opts.gray_delta);
+
+    // Draw the specified number of circles.
+    for(var p = 0; p < opts.position.length; p++ ) {
+      for (var i = 0; i < opts.circles_per_cloud; i++) {
+          var random_gray = parseInt(Math.random() * (gray_extent[1] - gray_extent[0]) + gray_extent[0]);
+
+          var circle_radius = opts.radius * opts.circle_radius_ratio;
+          if(opts.circle_radius_ratio instanceof Array && opts.circle_radius_ratio.length === 2){
+            circle_radius = opts.radius * (Math.random() * (opts.circle_radius_ratio[1] - opts.circle_radius_ratio[0]) + opts.circle_radius_ratio[0]);
+          }
+
+          // Compute a randomised circle position within the cloud.
+          var angle = Math.random() * TWO_PI;
+          var cx = opts.position[p][0] + Math.random() * Math.cos(angle) * (opts.radius - circle_radius) * opts.ratio_circles_x;
+          var cy = opts.position[p][1] + Math.random() * Math.sin(angle) * (opts.radius - circle_radius) * opts.ratio_circles_y;
+
+
+          var gradient = context.createRadialGradient(cx, cy, 0, cx, cy, circle_radius);
+
+          var gradient_color = 'rgba(' + gray_to_rgb(random_gray) + ', ';
+          gradient.addColorStop(0, gradient_color + '1)');
+          gradient.addColorStop(1, gradient_color + '0)');
+
+
+          context.beginPath();
+          context.fillStyle = gradient;
+          context.arc(cx, cy, circle_radius, 0, TWO_PI, true);
+          context.fill();
+          context.closePath();
+
+      }
+    }
+
+    return this;
+
+  };
+}());
+
+// Define airMass class
+class airMass {
+  constructor(x, h, T, nV, nW) {
+	  this.x = x; // x coordinate in pixel
+	  this.h = h; // height in m
+	  this.T = T; // Temperature in K
+	  this.nV = nV; // molar fraction of water vapour
+	  this.nW = nW; // number of moles of water
+  }
+  
+  // Pressure in Pascal
+  get P() {
+	return pressure(this.h);
+  }
+  
+  // Vapour partial pressure
+  get Pv() {
+	return this.P * this.nV;
+  }
+  
+  // Vapour pressure in Pascal
+  get Pv_max() {
+	return vapour_pressure(this.T);
+  }
+  
+  // Relative humidity
+  get RH() {
+	return this.Pv / this.Pv_max;
+  }
+  
+  // Length of side of square representing the air mass, in pixel
+  get side() {
+	return Math.pow( R * this.T / this.P , 1 / 3 ) * scale;
+  }
+  
+  // y coordinate of airMass on the canvas
+  get y() {
+	return height - this.h / hscale;
+  }
+  
+  // Move the air mass
+  move(dx, dy) {
+	let dh = - dy * hscale;
+	this.x += dx;
+	if ( this.h + dh < 0 ) { dh = - this.h }	
+	
+	
+	// Check saturation
+	if ( dh > 0 ) {
+		// Going up
+		
+		// Check saturation
+		// 0.999 added for numerical small errors
+		if ( this.Pv < this.Pv_max * 0.999) {
+			
+			// Dry adiabatic cooling
+			this.T += - L * dh;	
+			this.h += dh;
+			
+			// moistflag = false; // Debug
+		} else {
+		
+			// Moist adiabatic cooling
+			this.T = moist_adiabatic(this.T, this.h - dh, dh)
+			this.h += dh;
+			
+			// Condensation
+			this.nW += this.nV - this.Pv_max / this.P;
+			this.nV = this.Pv_max / this.P;
+			
+			// moistflag = true; // Debug
+		}
+	} else {
+		// Going down
+		
+		// Check if liquid water is present
+		if ( this.nW > 0 ) {
+			
+			// Moist adiabatic heating
+			this.T = moist_adiabatic(this.T, this.h - dh, dh)
+			this.h += dh;
+			
+			// Evaporation
+			const deltan = Math.min( this.nW, this.Pv_max / this.P - this.nV );
+			this.nW += - deltan;
+			this.nV += deltan;
+			
+			// moistflag = true; // Debug
+		} else {
+		
+			// Dry adiabatic heating
+			this.T += - L * dh;	
+			this.h += dh;
+			
+			// moistflag = false; // Debug
+		}
+	}
+	
+	
+  }
+  
+  // Draw the square representing air mass
+  draw() {
+	// Draw the cloud
+	if ( this.nW > 0 ) {
+		ctx.appendCloud({
+			// Cloud radius
+			radius: this.side * (1 + this.nW * 100),
+
+			// Center of the cloud coordinates [x, y]. If null, it's to the top-left of the canvas
+			// Can also be an array of coordinates if the cloud have many positions [[x,y],..]
+			position: [this.x + this.side / 2, this.y - this.side / 2],
+
+			// rgb(gray, gray, gray) - goes from 0 for black to 255 for white
+			gray: Math.floor( 255 - this.nW * 3000),
+
+			// How much we variate the gray
+			gray_delta: 50,
+
+			// How many circles we draw per cloud
+			circles_per_cloud: Math.floor( this.nW * 1000) + 1,
+
+			// Inner Cloud Circle radius (from 0 to 1), Can be either Float or Array of float [min, max]
+			circle_radius_ratio: [0.3, 0.6]
+		})
+	/*
+		const col = Math.floor( 255 - this.nW * 3000);
+		const a = Math.min(this.nW * 1000, 1);
+		ctx.fillStyle = "rgba("+col+","+col+","+col+","+a+")";
+		ctx.fillRect(this.x, this.y - this.side, this.side, this.side);
+	*/
+	/*
+		for (let i = 0; i < this.nW * 100000; i++) {
+			const col = Math.floor(Math.random() * 55) + 200;
+			ctx.fillStyle = "rgba("+col+","+col+","+col+","+1+")";
+			ctx.fillRect( 
+				Math.floor(Math.random() * (this.side) ) + this.x, 
+				Math.floor(Math.random() * (this.side) ) + this.y - this.side, 
+				1, 
+				1 
+			);
+		}
+	*/
+	}
+	
+	ctx.strokeStyle = 'rgb(0,0,255)';
+	ctx.setLineDash([6]);
+	ctx.strokeRect(this.x, this.y - this.side, this.side, this.side);
+	
+
+  }
+}
+
+// Create one air mass
+let aM = new airMass(
+	100, 
+	0,
+	303.16,
+	0.03,
+	0
+);
+
+// Mouse controls
+let selected = false;
+
+// Catch the airMass
+canvas.onmousedown = function(e) {
+	if(e.offsetX >= aM.x && e.offsetX <= aM.x + aM.side && e.offsetY >= aM.y - aM.side && e.offsetY <= aM.y) {
+		selected = true;
+	}
+}
+
+// Move the airMass
+canvas.onmousemove = function(e) {
+	if(selected) {
+		aM.move(e.movementX, e.movementY);
+		drawCanvas();
+	}
+}
+
+// Release the airMass
+window.onmouseup = function() {
+	selected = false;
+}
+
+// Zoom
+canvas.onwheel = function(e) {
+	hscale = hscale * Math.exp( e.deltaY / 200 );
+	if ( hscale > hscale_max ) {hscale = hscale_max;} 
+	drawCanvas();
+}
+
+// Slider controls
+let tempValue = tempSlider.value;
+
+tempSlider.oninput = function() {
+	aM.T += this.value - tempValue;
+	tempValue = this.value;
+	drawCanvas();
+}
+humiditySlider.oninput = function() {
+	aM.nV = this.value / 1000
+	drawCanvas();
+}
+
+let detailed = false;
+
+detailButton.onclick = function() {
+	if (detailed) { detailed = false; } else { detailed = true; }
+	drawCanvas();
+}
+
+// Draw the canvas
+function drawCanvas() {
+
+	// Sky
+	ctx.fillStyle = 'rgb(200,200,255)';
+	ctx.fillRect(0,0,width,height);
+	
+	// Infos
+	const lineh = 35;
+	ctx.fillStyle = '#000';
+	ctx.font = "20px Georgia";
+	ctx.fillText('Altitudine = ' + aM.h.toFixed(0) + ' m', width * 0.5, height * 0.1 );
+	ctx.fillText('Pressione = ' + aM.P.toFixed(0) + ' Pa', width * 0.5, height * 0.1 + lineh );
+	ctx.fillText('Temperatura = ' + ( aM.T - 273.15 ).toFixed(0) + '° C', width * 0.5, height * 0.1 + lineh * 2 );
+	ctx.fillText('Umidità assoluta = ' + (aM.nV * MM_water * 100000 / ( R * 288.16 ) ).toFixed(0) + ' g / Nm3', width * 0.5, height * 0.1 + lineh * 3 );
+	ctx.fillText('Limite di saturazione = ' + (aM.Pv_max / aM.P * MM_water * 100000 / ( R * 288.16 ) ).toFixed(0) + ' g / Nm3', width * 0.5, height * 0.1 + lineh * 4 );
+	ctx.fillText('Umidità relativa = ' + (aM.RH * 100).toFixed(0) + ' %', width * 0.5, height * 0.1 + lineh * 5 );
+	if (detailed) {
+		ctx.fillText('Pressione parziale vapore = ' + aM.Pv.toFixed(0) + ' Pa', width * 0.5, height * 0.1 + lineh * 6 );
+		ctx.fillText('Tensione di vapore = ' + aM.Pv_max.toFixed(0) + ' Pa', width * 0.5, height * 0.1 + lineh * 7 );
+		ctx.fillText('Acqua liquida = ' + (aM.nW * 1000).toFixed(0) + ' per mille', width * 0.5, height * 0.1 + lineh * 8 );
+	}
+	// ctx.fillText('Moist = ' + moistflag, width * 0.5, height * 0.1 + lineh * 7 );  // Debug
+	
+	ctx.fillStyle = 'red';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh + 10, aM.P / 500, 4);
+	ctx.fillStyle = 'yellow';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh * 2 + 10, ( aM.T - 200 ) * 2, 4);
+	ctx.fillStyle = 'blue';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh * 3 + 10, aM.nV * 10000, 4);
+	ctx.fillStyle = 'rgb(200,0,255)';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh * 4 + 10, aM.Pv_max / aM.P * 10000, 4);
+	ctx.fillStyle = 'white';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh * 5 + 10, 200, 4);
+	ctx.fillStyle = 'blue';
+	ctx.fillRect(width * 0.5, height * 0.1 + lineh * 5 + 10, 200 * aM.RH, 4);
+	
+	// Height scale
+	ctx.fillStyle = '#000';
+	for (let i = 1; i < 11; i++) {
+		ctx.fillText('- ' + i + ' km', 10, height - i * 1000 / hscale );
+	}
+	
+	
+	// airMass
+	aM.draw()
+}
+
+// At app loading, draw the canvas
+drawCanvas();
+
+    </script>
+  </body>
+</html>
